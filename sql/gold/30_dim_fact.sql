@@ -93,7 +93,21 @@ CREATE OR REPLACE TABLE FACT_RETURNS (
 ) CLUSTER BY (return_date);
 
 -- Aggregations
+
+-- Cash-basis: refunds attributed to the date the return was processed
 CREATE OR REPLACE TABLE AGG_DAILY_SALES (
+  order_date DATE,
+  total_orders NUMBER,
+  gross_revenue NUMBER(12,2),
+  total_refunds NUMBER(12,2),
+  net_revenue NUMBER(12,2),
+  total_returns NUMBER,
+  avg_order_value NUMBER(12,2),
+  load_ts TIMESTAMP_NTZ
+) CLUSTER BY (order_date);
+
+-- Accrual-basis: refunds attributed to the original order date (finance/GAAP view)
+CREATE OR REPLACE TABLE AGG_DAILY_SALES_ACCRUAL (
   order_date DATE,
   total_orders NUMBER,
   gross_revenue NUMBER(12,2),

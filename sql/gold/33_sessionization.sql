@@ -21,6 +21,7 @@ CREATE OR REPLACE TABLE FACT_SESSIONS (
   purchases NUMBER,
   is_bounce BOOLEAN,
   is_conversion BOOLEAN,
+  is_computed_session BOOLEAN DEFAULT FALSE,
   products_viewed ARRAY,
   load_ts TIMESTAMP_NTZ
 ) CLUSTER BY (session_start::DATE);

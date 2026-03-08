@@ -29,7 +29,49 @@ Every e-commerce platform deals with refunds. `FACT_RETURNS` tracks return reaso
 Enterprise governance requires controlling who sees what. Dynamic data masking policies on `email`, `phone`, and names ensure that `DE_ANALYST_ROLE` sees masked values while `DE_TRANSFORM_ROLE` sees the real data. A row access policy with region tags enables regional sales managers to only see their customers.
 
 ## 9. GDPR Right-to-Delete
-Compliance is non-negotiable. `SP_GDPR_DELETE` hard-deletes PII from silver tables and anonymizes gold dimension records (replacing PII with `REDACTED` while preserving surrogate keys so aggregates remain valid). Every action is logged to `GDPR_AUDIT_LOG` for regulatory proof.
+Compliance is non-negotiable. `SP_GDPR_DELETE` performs a three-layer deletion cascade:
+- **Bronze**: Hard-delete from all 5 raw tables (`CUSTOMERS_RAW`, `ORDERS_RAW`, `PAYMENTS_RAW`, `RETURNS_RAW`, `EVENTS_RAW`).
+- **Silver**: Hard-delete from all 5 cleaned tables.
+- **Gold**: Anonymize `DIM_CUSTOMER` (replace PII with `REDACTED`, preserve surrogate keys so aggregates remain valid).
+
+A **suppression list** (`GDPR_SUPPRESSION_LIST`) prevents re-ingestion: `SP_INGEST_BATCH` and `SP_INGEST_EVENTS` run post-COPY cleanup against it, and `SP_MERGE_SILVER_BATCH` / `SP_MERGE_SILVER_EVENTS` filter suppressed IDs during MERGE/INSERT. Every action is logged to `GDPR_AUDIT_LOG` for regulatory proof.
+
+**Time Travel & Fail-Safe caveat**: Snowflake retains deleted data in Time Travel (`DATA_RETENTION_TIME_IN_DAYS = 7`) and Fail-Safe (additional 7 days, Snowflake-controlled). Total: up to 14 days before physical deletion. This must be documented in your Data Processing Agreement (DPA). To reduce exposure, set `DATA_RETENTION_TIME_IN_DAYS = 1` on PII-containing tables after deletion.
 
 ## 10. Clickstream Sessionization
-Raw events are aggregated into `FACT_SESSIONS` with duration, bounce detection, and conversion flags. `VW_CONVERSION_FUNNEL` provides step-by-step funnel analysis (page_view → product_view → add_to_cart → checkout → purchase) with drop-off rates by device type — the exact view a product team would query.
+Raw events are aggregated into `FACT_SESSIONS` with duration, bounce detection, and conversion flags. `VW_CONVERSION_FUNNEL` provides step-by-step funnel analysis (page_view → product_view → add_to_cart → checkout → purchase) with drop-off rates by device type.
+
+**Computed sessionization**: Not all event sources provide a `session_id`. `VW_EVENTS_WITH_COMPUTED_SESSION` uses a 30-minute inactivity timeout (via `LAG` window function) to assign session boundaries when the source `session_id` is NULL. Events with a pre-supplied `session_id` pass through unchanged. Computed sessions are flagged with `is_computed_session = TRUE` in `FACT_SESSIONS` for downstream filtering.
+
+## 11. Schema Evolution Limitations
+Bronze ingestion uses `ERROR_ON_COLUMN_COUNT_MISMATCH = FALSE` to handle extra columns gracefully. However, this only covers additive changes. It does **not** protect against:
+- Column type changes (e.g., `STRING` → `NUMBER`)
+- Column reordering (positional CSV parsing breaks)
+- Column renames (old column appears dropped, new one added)
+
+**Mitigation**: Schema drift DQ checks (`schema_drift_*`) monitor column counts for each Bronze raw table. For proactive detection, consider `INFER_SCHEMA()` on staged files before COPY INTO to compare against table DDL. For critical sources, pin the file format to a named schema version and validate before loading.
+
+## 12. Stream Staleness Risk
+Snowflake streams become stale if not consumed within the table's `DATA_RETENTION_TIME_IN_DAYS` (7 days for this database). A stale stream loses its offset and cannot be used — recovery requires recreating the stream (which means a full re-process for that table).
+
+**Mitigation**:
+- DQ checks (`stream_staleness_bronze_*`, `stream_staleness_silver_*`) monitor all streams via `SHOW STREAMS` and flag stale ones as FAIL.
+- Tasks use `SUSPEND_TASK_AFTER_NUM_FAILURES` to prevent runaway retries while preserving the stream offset.
+- Events path runs every 5 minutes (well within the 7-day window), but batch path should be monitored during long holidays or outages.
+
+## 13. Incremental Processing & SCD2 Temporal Joins
+The gold build is fully stream-driven: each dimension/fact only processes when `SYSTEM$STREAM_HAS_DATA()` returns TRUE for its corresponding Silver→Gold stream. This eliminates unnecessary full-table scans on quiet periods.
+
+**SCD2 temporal joins**: Fact tables join to `DIM_CUSTOMER` using point-in-time range joins (`order_ts >= valid_from AND order_ts < valid_to`) instead of `is_current = TRUE`. This ensures historical orders retain the customer attributes that were active at the time of the transaction, not the customer's current attributes. This is critical for accurate retention cohorts and revenue attribution.
+
+## 14. Accrual vs Cash-Basis Revenue
+Two aggregate tables serve different stakeholders:
+- **`AGG_DAILY_SALES`** (cash-basis): Refunds counted on the date the return was processed. Matches bank statements.
+- **`AGG_DAILY_SALES_ACCRUAL`** (accrual-basis): Refunds attributed back to the original order date. Required for GAAP/IFRS reporting and gives a more accurate picture of "how well did sales perform on day X."
+
+## 15. Parallel Task DAG
+Batch and event paths are fully decoupled:
+- **Batch** (hourly): `TASK_INGEST_BATCH → TASK_MERGE_SILVER_BATCH → TASK_BUILD_GOLD_BATCH → TASK_DQ_CHECKS`
+- **Events** (every 5 min): `TASK_INGEST_EVENTS → TASK_MERGE_SILVER_EVENTS → TASK_BUILD_GOLD_EVENTS`
+
+Events reach gold within ~5-7 minutes of file landing instead of waiting up to 60 minutes for the next batch cycle. This decoupling also prevents a batch failure from blocking event processing and vice versa.

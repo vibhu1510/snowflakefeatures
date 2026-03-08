@@ -123,6 +123,15 @@ BEGIN
   PATTERN = '.*returns.*\\.csv.*'
   ON_ERROR = 'CONTINUE';
 
+  -- Post-COPY GDPR suppression cleanup: remove any re-ingested suppressed customers.
+  -- COPY INTO does not support subquery filters, so we purge after loading.
+  DELETE FROM BRONZE.CUSTOMERS_RAW WHERE customer_id IN (SELECT customer_id FROM UTIL.GDPR_SUPPRESSION_LIST);
+  DELETE FROM BRONZE.ORDERS_RAW WHERE customer_id IN (SELECT customer_id FROM UTIL.GDPR_SUPPRESSION_LIST);
+  DELETE FROM BRONZE.PAYMENTS_RAW WHERE order_id IN (
+    SELECT order_id FROM BRONZE.ORDERS_RAW WHERE customer_id IN (SELECT customer_id FROM UTIL.GDPR_SUPPRESSION_LIST)
+  );
+  DELETE FROM BRONZE.RETURNS_RAW WHERE customer_id IN (SELECT customer_id FROM UTIL.GDPR_SUPPRESSION_LIST);
+
   RETURN 'SP_INGEST_BATCH completed';
 END;
 $$;
@@ -152,6 +161,9 @@ BEGIN
   FILE_FORMAT = (FORMAT_NAME = 'BRONZE.FF_ECOM_JSON')
   PATTERN = '.*events.*\\.json.*'
   ON_ERROR = 'CONTINUE';
+
+  -- Post-COPY GDPR suppression cleanup: remove any re-ingested suppressed customer events.
+  DELETE FROM BRONZE.EVENTS_RAW WHERE user_id IN (SELECT customer_id FROM UTIL.GDPR_SUPPRESSION_LIST);
 
   RETURN 'SP_INGEST_EVENTS completed';
 END;

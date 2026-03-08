@@ -1,5 +1,5 @@
 -- 45_dq_alerting.sql
--- DQ alerting: Snowflake ALERT on failures + trend analysis.
+-- DQ alerting: Snowflake ALERT on failures + trend analysis + webhook integration.
 
 USE ROLE DE_TRANSFORM_ROLE;
 USE WAREHOUSE TRANSFORM_WH;
@@ -38,6 +38,34 @@ FROM (
 WHERE rn = 1
 ORDER BY status DESC, check_name;
 
+-- DQ summary by category (for executive dashboards)
+CREATE OR REPLACE VIEW VW_DQ_SUMMARY AS
+SELECT
+  CASE
+    WHEN check_name LIKE 'stream_staleness%' THEN 'Stream Health'
+    WHEN check_name LIKE 'schema_drift%' THEN 'Schema Drift'
+    WHEN check_name LIKE '%_fk' OR check_name LIKE '%_recon%' THEN 'Referential Integrity'
+    WHEN check_name LIKE '%freshness%' OR check_name LIKE '%volume%' THEN 'Freshness & Volume'
+    WHEN check_name LIKE '%scd2%' OR check_name LIKE '%customer_sk%' THEN 'Dimension Integrity'
+    ELSE 'Data Quality'
+  END AS check_category,
+  COUNT(DISTINCT check_name) AS total_checks,
+  SUM(CASE WHEN status = 'PASS' THEN 1 ELSE 0 END) AS passing,
+  SUM(CASE WHEN status = 'FAIL' THEN 1 ELSE 0 END) AS failing,
+  SUM(CASE WHEN status = 'WARN' THEN 1 ELSE 0 END) AS warnings
+FROM (
+  SELECT check_name, status,
+    ROW_NUMBER() OVER (PARTITION BY check_name ORDER BY check_ts DESC) AS rn
+  FROM DQ_RESULTS
+)
+WHERE rn = 1
+GROUP BY check_category
+ORDER BY failing DESC;
+
+-- ============================================================
+-- EMAIL ALERT (existing)
+-- ============================================================
+
 -- Snowflake ALERT: fires when new DQ failures are detected since last check
 -- The alert checks every 15 minutes; if there are recent failures it triggers.
 CREATE OR REPLACE ALERT ALERT_DQ_FAILURES
@@ -69,8 +97,74 @@ CREATE OR REPLACE ALERT ALERT_DQ_FAILURES
 --   ENABLED = TRUE
 --   ALLOWED_RECIPIENTS = ('data-team@example.com');
 
--- Alternative: use a webhook for Slack/PagerDuty (requires external function)
--- CALL SYSTEM$SEND_NOTIFICATION('DQ_WEBHOOK_INTEGRATION', ...);
-
--- Resume alert
+-- Resume email alert
 ALTER ALERT ALERT_DQ_FAILURES RESUME;
+
+-- ============================================================
+-- WEBHOOK ALERT (Slack / PagerDuty / Teams)
+-- ============================================================
+-- Snowflake supports webhook notification integrations for real-time alerting.
+-- This is the recommended approach for production pipelines since it enables
+-- immediate Slack notifications, PagerDuty incident creation, or Teams messages.
+
+-- Step 1: Create a webhook notification integration (one-time setup by ACCOUNTADMIN)
+-- Replace the URL with your actual Slack webhook URL or PagerDuty Events API endpoint.
+--
+-- CREATE OR REPLACE NOTIFICATION INTEGRATION DQ_WEBHOOK_INTEGRATION
+--   TYPE = WEBHOOK
+--   ENABLED = TRUE
+--   WEBHOOK_URL = '<YOUR_SLACK_WEBHOOK_URL>'
+--   WEBHOOK_BODY_TEMPLATE = '{
+--     "text": "🚨 *SNOWFLAKE DQ ALERT*\nSNOWFLAKE_WEBHOOK_MESSAGE"
+--   }'
+--   WEBHOOK_HEADERS = ('Content-Type'='application/json')
+--   ALLOWED_RECIPIENTS = ('<YOUR_SLACK_WEBHOOK_DOMAIN>');
+--
+-- GRANT USAGE ON INTEGRATION DQ_WEBHOOK_INTEGRATION TO ROLE DE_TRANSFORM_ROLE;
+
+-- Step 2: Create the webhook alert
+-- This fires alongside the email alert but sends to Slack/PagerDuty.
+--
+-- CREATE OR REPLACE ALERT ALERT_DQ_WEBHOOK
+--   WAREHOUSE = TRANSFORM_WH
+--   SCHEDULE = 'USING CRON */15 * * * * America/Los_Angeles'
+--   IF (EXISTS (
+--     SELECT 1
+--     FROM UTIL.DQ_RESULTS
+--     WHERE status = 'FAIL'
+--       AND check_ts >= DATEADD('minute', -15, CURRENT_TIMESTAMP())
+--   ))
+--   THEN
+--     CALL SYSTEM$SEND_NOTIFICATION(
+--       'DQ_WEBHOOK_INTEGRATION',
+--       (SELECT LISTAGG(
+--         CONCAT('• ', check_name, ': ', details, ' (observed=', observed_value, ')'),
+--         '\n'
+--        )
+--        FROM UTIL.DQ_RESULTS
+--        WHERE status = 'FAIL'
+--          AND check_ts >= DATEADD('minute', -15, CURRENT_TIMESTAMP()))
+--     );
+--
+-- ALTER ALERT ALERT_DQ_WEBHOOK RESUME;
+
+-- ============================================================
+-- PAGERDUTY EXAMPLE (for on-call escalation)
+-- ============================================================
+-- For critical failures (stream staleness, schema drift, recon mismatches),
+-- route to PagerDuty for on-call escalation:
+--
+-- CREATE OR REPLACE NOTIFICATION INTEGRATION DQ_PAGERDUTY_INTEGRATION
+--   TYPE = WEBHOOK
+--   ENABLED = TRUE
+--   WEBHOOK_URL = 'https://events.pagerduty.com/v2/enqueue'
+--   WEBHOOK_BODY_TEMPLATE = '{
+--     "routing_key": "YOUR_PAGERDUTY_ROUTING_KEY",
+--     "event_action": "trigger",
+--     "payload": {
+--       "summary": "SNOWFLAKE_WEBHOOK_MESSAGE",
+--       "severity": "critical",
+--       "source": "snowflake-ecommerce-pipeline"
+--     }
+--   }'
+--   WEBHOOK_HEADERS = ('Content-Type'='application/json');

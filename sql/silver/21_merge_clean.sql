@@ -1,17 +1,27 @@
 -- 21_merge_clean.sql
--- Stored procedure to incrementally merge bronze streams into silver tables.
+-- Stored procedures to incrementally merge bronze streams into silver tables.
+-- Split into batch (dimensions + transactional) and events (clickstream) for
+-- independent scheduling. Both wrapped in transactions with error handling.
 
 USE ROLE DE_TRANSFORM_ROLE;
 USE WAREHOUSE TRANSFORM_WH;
 USE DATABASE ECOMMERCE_DB;
 
-CREATE OR REPLACE PROCEDURE UTIL.SP_MERGE_SILVER()
+-- ============================================================
+-- SP_MERGE_SILVER_BATCH: Customers, Products, Orders, Payments, Returns
+-- Called by TASK_MERGE_SILVER_BATCH (hourly, after batch ingestion)
+-- ============================================================
+CREATE OR REPLACE PROCEDURE UTIL.SP_MERGE_SILVER_BATCH()
 RETURNS STRING
 LANGUAGE SQL
 AS
 $$
+DECLARE
+  v_error_msg STRING;
 BEGIN
-  -- Customers
+  BEGIN TRANSACTION;
+
+  -- Customers (filtered against GDPR suppression list)
   MERGE INTO SILVER.CUSTOMERS AS tgt
   USING (
     SELECT *
@@ -31,6 +41,7 @@ BEGIN
       FROM BRONZE.CUSTOMERS_RAW_STREAM
       WHERE METADATA$ACTION IN ('INSERT','UPDATE')
         AND customer_id IS NOT NULL
+        AND customer_id NOT IN (SELECT customer_id FROM UTIL.GDPR_SUPPRESSION_LIST)
     )
     WHERE rn = 1
   ) AS src
@@ -89,7 +100,7 @@ BEGIN
     INSERT (product_id, sku, name, category, price, currency, created_at, updated_at, record_source, load_ts)
     VALUES (src.product_id, src.sku, src.name, src.category, src.price, src.currency, src.created_at, src.updated_at, src.record_source, src.load_ts);
 
-  -- Orders
+  -- Orders (filtered against GDPR suppression list)
   MERGE INTO SILVER.ORDERS AS tgt
   USING (
     SELECT *
@@ -111,6 +122,7 @@ BEGIN
       FROM BRONZE.ORDERS_RAW_STREAM
       WHERE METADATA$ACTION IN ('INSERT','UPDATE')
         AND order_id IS NOT NULL
+        AND customer_id NOT IN (SELECT customer_id FROM UTIL.GDPR_SUPPRESSION_LIST)
     )
     WHERE rn = 1
   ) AS src
@@ -132,7 +144,7 @@ BEGIN
     INSERT (order_id, customer_id, order_ts, status, subtotal, tax, shipping, total, payment_method, updated_at, record_source, load_ts)
     VALUES (src.order_id, src.customer_id, src.order_ts, src.status, src.subtotal, src.tax, src.shipping, src.total, src.payment_method, src.updated_at, src.record_source, src.load_ts);
 
-  -- Payments
+  -- Payments (filtered: exclude payments for suppressed customers' orders)
   MERGE INTO SILVER.PAYMENTS AS tgt
   USING (
     SELECT *
@@ -151,6 +163,10 @@ BEGIN
       FROM BRONZE.PAYMENTS_RAW_STREAM
       WHERE METADATA$ACTION IN ('INSERT','UPDATE')
         AND payment_id IS NOT NULL
+        AND order_id NOT IN (
+          SELECT order_id FROM BRONZE.ORDERS_RAW
+          WHERE customer_id IN (SELECT customer_id FROM UTIL.GDPR_SUPPRESSION_LIST)
+        )
     )
     WHERE rn = 1
   ) AS src
@@ -169,7 +185,7 @@ BEGIN
     INSERT (payment_id, order_id, payment_ts, amount, status, provider, updated_at, record_source, load_ts)
     VALUES (src.payment_id, src.order_id, src.payment_ts, src.amount, src.status, src.provider, src.updated_at, src.record_source, src.load_ts);
 
-  -- Returns
+  -- Returns (filtered against GDPR suppression list)
   MERGE INTO SILVER.RETURNS AS tgt
   USING (
     SELECT *
@@ -189,6 +205,7 @@ BEGIN
       FROM BRONZE.RETURNS_RAW_STREAM
       WHERE METADATA$ACTION IN ('INSERT','UPDATE')
         AND return_id IS NOT NULL
+        AND customer_id NOT IN (SELECT customer_id FROM UTIL.GDPR_SUPPRESSION_LIST)
     )
     WHERE rn = 1
   ) AS src
@@ -208,7 +225,37 @@ BEGIN
     INSERT (return_id, order_id, customer_id, return_ts, reason, refund_amount, status, updated_at, record_source, load_ts)
     VALUES (src.return_id, src.order_id, src.customer_id, src.return_ts, src.reason, src.refund_amount, src.status, src.updated_at, src.record_source, src.load_ts);
 
-  -- Events (append-only)
+  COMMIT;
+  RETURN 'SP_MERGE_SILVER_BATCH completed successfully';
+
+EXCEPTION
+  WHEN OTHER THEN
+    ROLLBACK;
+    v_error_msg := SQLERRM;
+    -- Log failure for DQ alerting visibility
+    INSERT INTO UTIL.DQ_RESULTS (check_name, status, observed_value, expected_value, details, check_ts)
+    VALUES ('merge_silver_batch_execution', 'FAIL', :v_error_msg, 'No errors',
+            'SP_MERGE_SILVER_BATCH failed and rolled back', CURRENT_TIMESTAMP());
+    RAISE;
+END;
+$$;
+
+-- ============================================================
+-- SP_MERGE_SILVER_EVENTS: Clickstream events (append-only)
+-- Called by TASK_MERGE_SILVER_EVENTS (every 5 min, after event ingestion)
+-- ============================================================
+CREATE OR REPLACE PROCEDURE UTIL.SP_MERGE_SILVER_EVENTS()
+RETURNS STRING
+LANGUAGE SQL
+AS
+$$
+DECLARE
+  v_error_msg STRING;
+BEGIN
+  BEGIN TRANSACTION;
+
+  -- Events: INSERT with cross-batch dedup guard (NOT IN existing event_ids)
+  -- and GDPR suppression filtering.
   INSERT INTO SILVER.EVENTS
     (event_id, event_ts, user_id, session_id, event_name, device_type, payload, record_source, load_ts)
   SELECT
@@ -236,12 +283,41 @@ BEGIN
     FROM BRONZE.EVENTS_RAW_STREAM
     WHERE METADATA$ACTION = 'INSERT'
       AND event_id IS NOT NULL
+      AND user_id NOT IN (SELECT customer_id FROM UTIL.GDPR_SUPPRESSION_LIST)
   )
-  WHERE rn = 1;
+  WHERE rn = 1
+    AND event_id NOT IN (SELECT event_id FROM SILVER.EVENTS);
 
-  RETURN 'SP_MERGE_SILVER completed';
+  COMMIT;
+  RETURN 'SP_MERGE_SILVER_EVENTS completed successfully';
+
+EXCEPTION
+  WHEN OTHER THEN
+    ROLLBACK;
+    v_error_msg := SQLERRM;
+    INSERT INTO UTIL.DQ_RESULTS (check_name, status, observed_value, expected_value, details, check_ts)
+    VALUES ('merge_silver_events_execution', 'FAIL', :v_error_msg, 'No errors',
+            'SP_MERGE_SILVER_EVENTS failed and rolled back', CURRENT_TIMESTAMP());
+    RAISE;
+END;
+$$;
+
+-- ============================================================
+-- SP_MERGE_SILVER: Convenience wrapper that calls both (for manual runs)
+-- ============================================================
+CREATE OR REPLACE PROCEDURE UTIL.SP_MERGE_SILVER()
+RETURNS STRING
+LANGUAGE SQL
+AS
+$$
+BEGIN
+  CALL UTIL.SP_MERGE_SILVER_BATCH();
+  CALL UTIL.SP_MERGE_SILVER_EVENTS();
+  RETURN 'SP_MERGE_SILVER completed (batch + events)';
 END;
 $$;
 
 -- Optional manual run
 -- CALL UTIL.SP_MERGE_SILVER();
+-- CALL UTIL.SP_MERGE_SILVER_BATCH();
+-- CALL UTIL.SP_MERGE_SILVER_EVENTS();
