@@ -1,0 +1,102 @@
+-- 50_data_masking.sql
+-- Dynamic data masking and row access policies for enterprise governance.
+-- PII fields are masked for analysts; data engineers see full values.
+
+USE ROLE SECURITYADMIN;
+
+-- Analyst role: can query gold but sees masked PII
+CREATE ROLE IF NOT EXISTS DE_ANALYST_ROLE;
+GRANT ROLE DE_ANALYST_ROLE TO ROLE DE_ADMIN_ROLE;
+
+USE ROLE SYSADMIN;
+
+GRANT USAGE ON WAREHOUSE ANALYTICS_WH TO ROLE DE_ANALYST_ROLE;
+GRANT USAGE ON DATABASE ECOMMERCE_DB TO ROLE DE_ANALYST_ROLE;
+GRANT USAGE ON SCHEMA ECOMMERCE_DB.GOLD TO ROLE DE_ANALYST_ROLE;
+GRANT SELECT ON ALL TABLES IN SCHEMA ECOMMERCE_DB.GOLD TO ROLE DE_ANALYST_ROLE;
+GRANT SELECT ON FUTURE TABLES IN SCHEMA ECOMMERCE_DB.GOLD TO ROLE DE_ANALYST_ROLE;
+GRANT SELECT ON ALL VIEWS IN SCHEMA ECOMMERCE_DB.GOLD TO ROLE DE_ANALYST_ROLE;
+GRANT SELECT ON FUTURE VIEWS IN SCHEMA ECOMMERCE_DB.GOLD TO ROLE DE_ANALYST_ROLE;
+
+-- ----------
+-- Dynamic Data Masking Policies
+-- ----------
+USE ROLE DE_ADMIN_ROLE;
+USE DATABASE ECOMMERCE_DB;
+USE SCHEMA UTIL;
+
+-- Email masking: analysts see "j***@***.com", engineers see full value
+CREATE OR REPLACE MASKING POLICY MP_EMAIL_MASK AS (val STRING)
+RETURNS STRING ->
+  CASE
+    WHEN CURRENT_ROLE() IN ('DE_ADMIN_ROLE', 'DE_TRANSFORM_ROLE', 'DE_INGEST_ROLE', 'SYSADMIN')
+      THEN val
+    WHEN val IS NULL THEN NULL
+    ELSE CONCAT(LEFT(val, 1), '***@***.', SPLIT_PART(val, '.', -1))
+  END;
+
+-- Phone masking: analysts see "***-**03", engineers see full value
+CREATE OR REPLACE MASKING POLICY MP_PHONE_MASK AS (val STRING)
+RETURNS STRING ->
+  CASE
+    WHEN CURRENT_ROLE() IN ('DE_ADMIN_ROLE', 'DE_TRANSFORM_ROLE', 'DE_INGEST_ROLE', 'SYSADMIN')
+      THEN val
+    WHEN val IS NULL THEN NULL
+    ELSE CONCAT('***-**', RIGHT(val, 2))
+  END;
+
+-- Name masking: analysts see first initial + "***"
+CREATE OR REPLACE MASKING POLICY MP_NAME_MASK AS (val STRING)
+RETURNS STRING ->
+  CASE
+    WHEN CURRENT_ROLE() IN ('DE_ADMIN_ROLE', 'DE_TRANSFORM_ROLE', 'DE_INGEST_ROLE', 'SYSADMIN')
+      THEN val
+    WHEN val IS NULL THEN NULL
+    ELSE CONCAT(LEFT(val, 1), '***')
+  END;
+
+-- Apply masking policies to gold dimension
+ALTER TABLE GOLD.DIM_CUSTOMER MODIFY COLUMN email
+  SET MASKING POLICY MP_EMAIL_MASK;
+ALTER TABLE GOLD.DIM_CUSTOMER MODIFY COLUMN phone
+  SET MASKING POLICY MP_PHONE_MASK;
+ALTER TABLE GOLD.DIM_CUSTOMER MODIFY COLUMN first_name
+  SET MASKING POLICY MP_NAME_MASK;
+ALTER TABLE GOLD.DIM_CUSTOMER MODIFY COLUMN last_name
+  SET MASKING POLICY MP_NAME_MASK;
+
+-- ----------
+-- Row Access Policy (regional filtering)
+-- ----------
+-- Session variable controls which region the current user can see.
+-- Set via: ALTER SESSION SET REGION_FILTER = 'US_WEST';
+-- Admins and transform roles see all rows.
+
+CREATE OR REPLACE ROW ACCESS POLICY RAP_REGION_FILTER AS (region_val STRING)
+RETURNS BOOLEAN ->
+  CURRENT_ROLE() IN ('DE_ADMIN_ROLE', 'DE_TRANSFORM_ROLE', 'SYSADMIN')
+  OR region_val = COALESCE(
+    SYSTEM$GET_TAG('ECOMMERCE_DB.UTIL.TAG_REGION', CURRENT_ROLE(), 'ROLE'),
+    'ALL'
+  )
+  OR COALESCE(
+    SYSTEM$GET_TAG('ECOMMERCE_DB.UTIL.TAG_REGION', CURRENT_ROLE(), 'ROLE'),
+    'ALL'
+  ) = 'ALL';
+
+-- Tag to assign region to roles
+CREATE OR REPLACE TAG ECOMMERCE_DB.UTIL.TAG_REGION
+  ALLOWED_VALUES = 'US_WEST', 'US_EAST', 'EU_WEST', 'ALL'
+  COMMENT = 'Region tag for row-level access filtering';
+
+-- Example: restrict an analyst role to US_WEST only
+-- ALTER ROLE DE_ANALYST_ROLE SET TAG ECOMMERCE_DB.UTIL.TAG_REGION = 'US_WEST';
+
+-- Apply row access policy to customer dimension (requires region column)
+-- ALTER TABLE GOLD.DIM_CUSTOMER ADD ROW ACCESS POLICY RAP_REGION_FILTER ON (region);
+
+-- Verification queries (run as different roles to test)
+-- USE ROLE DE_ANALYST_ROLE;
+-- SELECT * FROM GOLD.DIM_CUSTOMER;  -- PII masked, region-filtered
+-- USE ROLE DE_TRANSFORM_ROLE;
+-- SELECT * FROM GOLD.DIM_CUSTOMER;  -- Full PII, all regions

@@ -1,0 +1,5 @@
+{"event_id":"E1","event_ts":"2026-02-08T10:01:00","user_id":"C001","session_id":"S100","event_name":"page_view","device_type":"mobile","payload":{"page":"home","referrer":"google"}}
+{"event_id":"E2","event_ts":"2026-02-08T10:03:00","user_id":"C001","session_id":"S100","event_name":"product_view","device_type":"mobile","payload":{"product_id":"P101","page":"product"}}
+{"event_id":"E3","event_ts":"2026-02-08T10:05:00","user_id":"C002","session_id":"S101","event_name":"add_to_cart","device_type":"desktop","payload":{"product_id":"P100","qty":1}}
+{"event_id":"E4","event_ts":"2026-02-08T10:08:00","user_id":"C003","session_id":"S102","event_name":"checkout_start","device_type":"desktop","payload":{"cart_value":365.32}}
+{"event_id":"E5","event_ts":"2026-02-08T10:09:30","user_id":"C003","session_id":"S102","event_name":"purchase","device_type":"desktop","payload":{"order_id":"O9003","revenue":365.32}}
