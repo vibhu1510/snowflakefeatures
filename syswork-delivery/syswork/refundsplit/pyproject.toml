@@ -1,0 +1,20 @@
+[project]
+name = "refundsplit"
+version = "0.1.0"
+description = "Split a refund across order lines, to the cent."
+requires-python = ">=3.10"
+dependencies = []          # runtime: standard library only, on purpose
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "hypothesis>=6", "ruff>=0.5"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]       # so tests import refundsplit with no install step
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = [".", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N"]

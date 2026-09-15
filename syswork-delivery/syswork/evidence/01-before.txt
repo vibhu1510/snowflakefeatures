@@ -1,0 +1,40 @@
+$ git log --oneline -1
+834da14 Add refundsplit: refund allocation service with local web surface
+
+$ ruff check .
+All checks passed!
+
+$ python -m pytest -q
+..............                                                           [100%]
+14 passed in 2.37s
+
+# A clean linter and a green suite. Now start it and look at the money.
+$ python3 -m refundsplit
+refundsplit running on http://127.0.0.1:8011  (ctrl-c to stop)
+
+$ curl -s localhost:8000/api/allocate -d '{"total":"100.00", 3 lines of $10.00}'
+{
+    "total": "100.00",
+    "total_display": "$100.00",
+    "shares": [
+        {
+            "line_id": "L-001",
+            "amount": "33.33",
+            "display": "$33.33"
+        },
+        {
+            "line_id": "L-002",
+            "amount": "33.33",
+            "display": "$33.33"
+        },
+        {
+            "line_id": "L-003",
+            "amount": "33.33",
+            "display": "$33.33"
+        }
+    ],
+    "allocated": "99.99",
+    "allocated_display": "$99.99",
+    "difference_display": "-$0.01",
+    "reconciled": false
+}

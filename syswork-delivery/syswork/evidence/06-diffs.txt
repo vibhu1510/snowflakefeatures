@@ -1,0 +1,158 @@
+$ git log --oneline --stat
+6191efc Settle allocation ties on line_id, not on input position
+ .gitignore                |  1 +
+ docs/ALLOCATION-POLICY.md | 42 +++++++++++++++++++++++++
+ docs/REVIEW.md            | 79 +++++++++++++++++++++++++++++++++++++++++++++++
+ refundsplit/allocate.py   | 19 +++++++++---
+ tests/test_allocate.py    | 13 ++++++++
+ tests/test_properties.py  | 18 +++++++++++
+ 6 files changed, 168 insertions(+), 4 deletions(-)
+9aa6cbc Fix ENG-4172: allocate refunds by largest remainder, in integer cents
+ refundsplit/allocate.py  | 47 +++++++++++++++++++++++++++++++++++------------
+ tests/test_allocate.py   | 42 ++++++++++++++++++++++++++++++++++++++++++
+ tests/test_properties.py | 17 ++++++++++++++++-
+ 3 files changed, 93 insertions(+), 13 deletions(-)
+834da14 Add refundsplit: refund allocation service with local web surface
+ .github/workflows/ci.yml    |  17 ++++
+ .gitignore                  |   5 ++
+ CLAUDE.md                   |  40 +++++++++
+ README.md                   |  37 ++++++++
+ docs/ENG-4172.md            |  46 ++++++++++
+ pyproject.toml              |  20 +++++
+ refundsplit/__init__.py     |   6 ++
+ refundsplit/__main__.py     |  19 +++++
+ refundsplit/allocate.py     |  57 +++++++++++++
+ refundsplit/money.py        |  58 +++++++++++++
+ refundsplit/static/app.html | 204 ++++++++++++++++++++++++++++++++++++++++++++
+ refundsplit/web.py          | 103 ++++++++++++++++++++++
+ tests/test_allocate.py      |  36 ++++++++
+ tests/test_money.py         |  27 ++++++
+ tests/test_properties.py    |  20 +++++
+ tests/test_web.py           |  55 ++++++++++++
+ 16 files changed, 750 insertions(+)
+[1]+  Terminated              nohup python3 -m refundsplit --port 8000 > /tmp/sf.log 2>&1
+
+================ the fix itself: 834da14..9aa6cbc, allocate.py only ================
+diff --git a/refundsplit/allocate.py b/refundsplit/allocate.py
+index b79c9c2..d886feb 100644
+--- a/refundsplit/allocate.py
++++ b/refundsplit/allocate.py
+@@ -14,9 +14,6 @@ from __future__ import annotations
+ 
+ from collections.abc import Sequence
+ from dataclasses import dataclass
+-from decimal import ROUND_HALF_UP, Decimal
+-
+-from .money import CENT, from_cents, to_cents
+ 
+ 
+ @dataclass(frozen=True)
+@@ -38,20 +35,46 @@ class Share:
+ def allocate(total_cents: int, lines: Sequence[Line]) -> list[Share]:
+     """Spread `total_cents` across `lines` in proportion to their amounts.
+ 
+-    Each line's share is its proportion of the order value, rounded to the
+-    nearest cent.
++    The shares always sum to `total_cents` exactly. Rounding each line
++    independently cannot promise that -- three equal lines of a $100.00 refund
++    round to $33.33 each and lose a cent -- so instead each line gets the whole
++    number of cents its proportion earns, and the cents left over by that
++    flooring are handed out one each, to the lines with the largest discarded
++    fraction first.
++
++    The arithmetic is integer throughout: no Decimal, no float, no rounding
++    mode to get wrong.
++
++    The one exception to the sum guarantee: if every line has an amount of
++    zero there is no proportion to divide by, and every share is zero. See
++    docs/ALLOCATION-POLICY.md.
+     """
+     if not lines:
+         return []
+ 
++    if any(line.amount_cents < 0 for line in lines):
++        raise ValueError("line amounts must be non-negative")
++
+     basis = sum(line.amount_cents for line in lines)
+     if basis == 0:
+         return [Share(line.line_id, 0) for line in lines]
+ 
+-    total = from_cents(total_cents)
+-    shares = []
+-    for line in lines:
+-        proportion = Decimal(line.amount_cents) / Decimal(basis)
+-        share = (total * proportion).quantize(CENT, rounding=ROUND_HALF_UP)
+-        shares.append(Share(line.line_id, to_cents(share)))
+-    return shares
++    # Each line's exact share is total_cents * amount / basis. Take the whole
++    # cents of that (divmod floors, which keeps the remainder non-negative even
++    # when total_cents is negative -- a refund reversal) and keep the remainder
++    # to rank who is owed the leftovers.
++    whole_cents: list[int] = []
++    ranking: list[tuple[int, int]] = []
++    for index, line in enumerate(lines):
++        share, remainder = divmod(total_cents * line.amount_cents, basis)
++        whole_cents.append(share)
++        ranking.append((remainder, index))
++
++    # Flooring every line leaves 0..len(lines)-1 cents unassigned. Give them to
++    # the largest discarded fractions first.
++    leftover = total_cents - sum(whole_cents)
++    ranking.sort(key=lambda entry: (-entry[0], entry[1]))
++    for _remainder, index in ranking[:leftover]:
++        whole_cents[index] += 1
++
++    return [Share(line.line_id, cents) for line, cents in zip(lines, whole_cents, strict=True)]
+
+================ what review changed: 9aa6cbc..HEAD, allocate.py only ================
+diff --git a/refundsplit/allocate.py b/refundsplit/allocate.py
+index d886feb..a36fa0d 100644
+--- a/refundsplit/allocate.py
++++ b/refundsplit/allocate.py
+@@ -45,6 +45,10 @@ def allocate(total_cents: int, lines: Sequence[Line]) -> list[Share]:
+     The arithmetic is integer throughout: no Decimal, no float, no rounding
+     mode to get wrong.
+ 
++    Ties in the discarded fraction are settled on `line_id`, so the same order
++    and refund always produce the same per-line shares no matter what order the
++    caller passes the lines in.
++
+     The one exception to the sum guarantee: if every line has an amount of
+     zero there is no proportion to divide by, and every share is zero. See
+     docs/ALLOCATION-POLICY.md.
+@@ -55,6 +59,10 @@ def allocate(total_cents: int, lines: Sequence[Line]) -> list[Share]:
+     if any(line.amount_cents < 0 for line in lines):
+         raise ValueError("line amounts must be non-negative")
+ 
++    line_ids = [line.line_id for line in lines]
++    if len(set(line_ids)) != len(line_ids):
++        raise ValueError("line_ids must be unique: ties are broken on line_id")
++
+     basis = sum(line.amount_cents for line in lines)
+     if basis == 0:
+         return [Share(line.line_id, 0) for line in lines]
+@@ -64,17 +72,20 @@ def allocate(total_cents: int, lines: Sequence[Line]) -> list[Share]:
+     # when total_cents is negative -- a refund reversal) and keep the remainder
+     # to rank who is owed the leftovers.
+     whole_cents: list[int] = []
+-    ranking: list[tuple[int, int]] = []
++    ranking: list[tuple[int, str, int]] = []
+     for index, line in enumerate(lines):
+         share, remainder = divmod(total_cents * line.amount_cents, basis)
+         whole_cents.append(share)
+-        ranking.append((remainder, index))
++        ranking.append((remainder, line.line_id, index))
+ 
+     # Flooring every line leaves 0..len(lines)-1 cents unassigned. Give them to
+-    # the largest discarded fractions first.
++    # the largest discarded fractions first. Equal fractions are settled on
++    # line_id -- never on position in the caller's list, or two services
++    # iterating the same order in different orders would disagree about which
++    # line owns the cent. See docs/ALLOCATION-POLICY.md.
+     leftover = total_cents - sum(whole_cents)
+     ranking.sort(key=lambda entry: (-entry[0], entry[1]))
+-    for _remainder, index in ranking[:leftover]:
++    for _remainder, _line_id, index in ranking[:leftover]:
+         whole_cents[index] += 1
+ 
+     return [Share(line.line_id, cents) for line, cents in zip(lines, whole_cents, strict=True)]

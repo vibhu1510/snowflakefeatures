@@ -1,0 +1,28 @@
+$ git log --oneline -1
+9aa6cbc Fix ENG-4172: allocate refunds by largest remainder, in integer cents
+
+$ ruff check .
+All checks passed!
+
+$ python -m pytest -q
+....................                                                     [100%]
+20 passed in 3.04s
+
+# How many inputs did the sum-invariant property actually check?
+$ python -m pytest tests/test_properties.py -q --hypothesis-show-statistics
+tests/test_properties.py::test_shares_always_sum_to_the_refund_total:
+
+  - during generate phase (0.72 seconds):
+    - Typical runtimes: ~ 0-1 ms, of which < 1ms in data generation
+    - 500 passing, 0 failing, and 109 invalid test cases
+
+$ curl -s localhost:8000/api/allocate -d '{"total":"100.00", 3 lines of $10.00}'
+{
+  "shares": [
+    "$33.34",
+    "$33.33",
+    "$33.33"
+  ],
+  "allocated": "$100.00",
+  "reconciled": true
+}

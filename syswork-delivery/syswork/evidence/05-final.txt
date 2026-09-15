@@ -1,0 +1,54 @@
+$ git log --oneline -1
+6191efc Settle allocation ties on line_id, not on input position
+
+$ ruff check .
+All checks passed!
+
+$ python -m pytest -q
+.......................                                                  [100%]
+23 passed in 4.65s
+
+# Both properties hold, each over 500 generated inputs per run.
+$ python -m pytest tests/test_properties.py -q --hypothesis-show-statistics
+tests/test_properties.py::test_one_share_per_line_in_the_same_order:
+    - 100 passing, 0 failing, and 28 invalid test cases
+tests/test_properties.py::test_shares_always_sum_to_the_refund_total:
+    - 500 passing, 0 failing, and 146 invalid test cases
+tests/test_properties.py::test_allocation_does_not_depend_on_the_order_lines_are_passed_in:
+    - 500 passing, 0 failing, and 118 invalid test cases
+
+# The review's case, settled: the shares no longer move with input order.
+$ python3 -c '...same three lines, two orders...'
+as entered   L-001=$33.34 L-002=$33.33 L-003=$33.33   sum= $100.00
+reordered    L-001=$33.34 L-002=$33.33 L-003=$33.33   sum= $100.00
+
+# And with no virtualenv, no install and no network:
+$ python3 -m refundsplit
+refundsplit running on http://127.0.0.1:8000  (ctrl-c to stop)
+
+$ curl -s localhost:8000/api/allocate -d '{"total":"100.00", 3 lines of $10.00}'
+{
+    "total": "100.00",
+    "total_display": "$100.00",
+    "shares": [
+        {
+            "line_id": "L-001",
+            "amount": "33.34",
+            "display": "$33.34"
+        },
+        {
+            "line_id": "L-002",
+            "amount": "33.33",
+            "display": "$33.33"
+        },
+        {
+            "line_id": "L-003",
+            "amount": "33.33",
+            "display": "$33.33"
+        }
+    ],
+    "allocated": "100.00",
+    "allocated_display": "$100.00",
+    "difference_display": "$0.00",
+    "reconciled": true
+}

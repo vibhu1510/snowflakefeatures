@@ -1,0 +1,20 @@
+# Rule 4 of CLAUDE.md: the failing test comes first. This is it, run against
+# the code as it stands, before a single line of the fix is written.
+
+$ python -m pytest -q tests/test_allocate.py::test_eng_4172_shares_sum_to_the_refund_total
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________ test_eng_4172_shares_sum_to_the_refund_total _________________
+
+    def test_eng_4172_shares_sum_to_the_refund_total():
+        """The reported case: $100.00 across three equal lines must not lose a cent."""
+        total = to_cents("100.00")
+        shares = allocate(total, EQUAL_THIRDS)
+>       assert sum(s.amount_cents for s in shares) == total
+E       assert 9999 == 10000
+E        +  where 9999 = sum(<generator object test_eng_4172_shares_sum_to_the_refund_total.<locals>.<genexpr> at 0x7fbfea624930>)
+
+tests/test_allocate.py:50: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_allocate.py::test_eng_4172_shares_sum_to_the_refund_total
+1 failed in 0.17s

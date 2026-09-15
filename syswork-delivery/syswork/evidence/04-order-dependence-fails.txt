@@ -1,0 +1,30 @@
+# The first pass is green and the sum invariant holds over 500 generated cases.
+# Review asks a question the suite never asked: does each line get the same
+# share regardless of the order the lines arrive in?
+
+$ python3 -c '...allocate the same three lines in two different orders...'
+as entered   L-001=$33.34 L-002=$33.33 L-003=$33.33   sum= $100.00
+reordered    L-001=$33.33 L-002=$33.33 L-003=$33.34   sum= $100.00
+
+# It does not. Written as a property and run against the first-pass fix:
+$ python -m pytest -q tests/test_properties.py -k does_not_depend
+E         {'L-005': 1} != {'L-005': 0}
+E         {'L-006': 0} != {'L-006': 1}
+E         Use -v to get more diff
+E       Failing test case: test_allocation_does_not_depend_on_the_order_lines_are_passed_in(
+E           total_cents=1,
+E           amounts=[0, 0, 0, 0, 0, 1, 1],
+E           data=data(...),
+E       )
+E       Draw 1: [Line(line_id='L-000', amount_cents=0),
+E        Line(line_id='L-006', amount_cents=1),
+E        Line(line_id='L-002', amount_cents=0),
+E        Line(line_id='L-003', amount_cents=0),
+E        Line(line_id='L-004', amount_cents=0),
+E        Line(line_id='L-005', amount_cents=1),
+E        Line(line_id='L-001', amount_cents=0)]
+
+tests/test_properties.py:53: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_properties.py::test_allocation_does_not_depend_on_the_order_lines_are_passed_in
+1 failed, 2 deselected in 2.24s
