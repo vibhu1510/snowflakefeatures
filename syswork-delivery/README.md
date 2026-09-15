@@ -4,9 +4,11 @@ These files were built to live in `~/Documents` on a Mac. They are stored here
 so they survive the session that created them; copy them across like this:
 
 ```
-syswork-delivery/TRANSCRIPT.md         ->  ~/Documents/TRANSCRIPT.md
-syswork-delivery/SDLC-FOR-NOVICES.md   ->  ~/Documents/SDLC-FOR-NOVICES.md
-syswork-delivery/syswork/              ->  ~/Documents/syswork/
+syswork-delivery/Ten-Minutes-One-Real-Task.pptx  ->  ~/Documents/
+syswork-delivery/TRANSCRIPT-SLIDES.md            ->  ~/Documents/
+syswork-delivery/TRANSCRIPT.md                   ->  ~/Documents/
+syswork-delivery/SDLC-FOR-NOVICES.md             ->  ~/Documents/
+syswork-delivery/syswork/                        ->  ~/Documents/syswork/
 ```
 
 The relative links between them assume exactly that layout.
@@ -21,7 +23,9 @@ take, with measured and proposed indicators kept strictly apart.
 
 | File | What it is |
 |---|---|
-| `TRANSCRIPT.md` | the spoken script, word for word, with stage directions |
+| `Ten-Minutes-One-Real-Task.pptx` | the deck — 14 slides, speaker notes in every one |
+| `TRANSCRIPT-SLIDES.md` | the spoken script for the deck, plus likely questions |
+| `TRANSCRIPT.md` | the spoken script for running the demo live instead |
 | `SDLC-FOR-NOVICES.md` | every concept in the session explained from zero |
 | `syswork/README.md` | start here for the materials themselves |
 | `syswork/RUNBOOK.md` | the timed script: what to type, what to say |

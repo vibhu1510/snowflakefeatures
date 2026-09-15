@@ -14,8 +14,17 @@ reviewed fix, and then asks what it would take for a team to work this way.
 | `evidence/` | the raw terminal output and screenshots, captured from real runs |
 | `refundsplit/` | the demo project — a real git repository with three commits |
 
-The presenter's spoken script is `../TRANSCRIPT.md`, and `../SDLC-FOR-NOVICES.md`
-explains every concept in the session from zero for anyone who needs it.
+Two ways to deliver it, and a script for each:
+
+| File | Use it when |
+|---|---|
+| `../Ten-Minutes-One-Real-Task.pptx` | you're presenting slides — 14 of them, speaker notes in every one |
+| `../TRANSCRIPT-SLIDES.md` | the spoken script for that deck, plus answers to the questions people ask |
+| `../TRANSCRIPT.md` | the spoken script for driving the demo live on a laptop instead |
+| `../SDLC-FOR-NOVICES.md` | someone in the room has never seen a repository before |
+
+The deck and the live demo tell the same story with the same numbers. The deck is safer
+in a room you don't control; the live demo lands harder when the wifi behaves.
 
 ## The 10 minutes
 
